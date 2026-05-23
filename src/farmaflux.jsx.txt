@@ -1,0 +1,661 @@
+import { useState, useEffect, useRef } from "react";
+import * as XLSX from "xlsx";
+
+// ── Storage helpers ──────────────────────────────────────────
+async function saveProject(p) {
+  try { await window.storage.set(`proj:${p.id}`, JSON.stringify(p)); } catch {}
+}
+async function loadAllProjects() {
+  try {
+    const r = await window.storage.list("proj:");
+    const keys = r?.keys || [];
+    const arr = [];
+    for (const k of keys) {
+      try { const v = await window.storage.get(k); if (v?.value) arr.push(JSON.parse(v.value)); } catch {}
+    }
+    return arr.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+  } catch { return []; }
+}
+async function deleteProjectById(id) { try { await window.storage.delete(`proj:${id}`); } catch {} }
+async function saveDB(key, val) { try { await window.storage.set(key, JSON.stringify(val)); } catch {} }
+async function loadDB(key) {
+  try { const r = await window.storage.get(key); return r?.value ? JSON.parse(r.value) : null; } catch { return null; }
+}
+
+// ── Helpers ──────────────────────────────────────────────────
+const DIAS = ["Domingo","Segunda-feira","Terça-feira","Quarta-feira","Quinta-feira","Sexta-feira","Sábado"];
+const getDOW = (d) => { if (!d) return ""; return DIAS[new Date(d + "T12:00:00").getDay()]; };
+const uid = () => Date.now().toString(36) + Math.random().toString(36).substr(2,5);
+const genCode = () => Math.random().toString(36).substr(2,8).toUpperCase();
+const fmtMZN = (v) => { const n = parseFloat(v); return isNaN(n) ? "0,00 MZN" : n.toLocaleString("pt-MZ",{minimumFractionDigits:2,maximumFractionDigits:2})+" MZN"; };
+
+// ── Excel export ─────────────────────────────────────────────
+function buildSheet(proj) {
+  const data = [
+    ["FLUXO DE CAIXA – FARMÁCIA"],
+    ["Entidade:", proj.entity || ""],
+    ["Data:", proj.date || "", "Dia:", getDOW(proj.date)],
+    [],
+    ["Nº","Descrição / Medicamento","Preço (MZN)","IVA 16%","Total (MZN)"],
+  ];
+  let total = 0;
+  (proj.rows||[]).forEach(r => {
+    const v = parseFloat(r.value)||0, iva = r.iva ? v*0.16 : 0, t = v+iva;
+    total += t;
+    data.push([r.order, r.description||"", v.toFixed(2), r.iva?iva.toFixed(2):"Isento", t.toFixed(2)]);
+  });
+  data.push([],["","","","TOTAL GERAL:", total.toFixed(2)]);
+  const ws = XLSX.utils.aoa_to_sheet(data);
+  ws["!cols"] = [{wch:5},{wch:36},{wch:14},{wch:11},{wch:14}];
+  return ws;
+}
+function exportOne(proj) {
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, buildSheet(proj), "Fluxo de Caixa");
+  XLSX.writeFile(wb, `FarmaFlux_${proj.entity||"Caixa"}_${proj.date||""}.xlsx`);
+}
+function exportMany(projs) {
+  const wb = XLSX.utils.book_new();
+  projs.forEach(p => {
+    const name = ((p.entity||"Caixa")+"_"+(p.date||uid()).replace(/-/g,"")).substring(0,31);
+    XLSX.utils.book_append_sheet(wb, buildSheet(p), name);
+  });
+  XLSX.writeFile(wb, `FarmaFlux_${Date.now()}.xlsx`);
+}
+
+// ── Styles ───────────────────────────────────────────────────
+const C = {
+  bg:"linear-gradient(135deg,#060d1f 0%,#0b1a35 60%,#060f20 100%)",
+  blue:"#4facfe", cyan:"#00f2fe", dim:"#5a7aaa", dimmer:"#2a4060",
+  card:"rgba(255,255,255,0.04)", border:"rgba(79,172,254,0.14)",
+};
+const S = {
+  app:{display:"flex",height:"100vh",background:C.bg,fontFamily:"'DM Sans','Segoe UI',sans-serif",color:"#dde8f8",overflow:"hidden"},
+  sidebar:(open)=>({width:open?256:58,transition:"width .28s ease",background:"rgba(255,255,255,0.03)",borderRight:`1px solid ${C.border}`,display:"flex",flexDirection:"column",flexShrink:0,overflow:"hidden"}),
+  logo:{fontSize:21,fontWeight:800,background:"linear-gradient(90deg,#4facfe,#00f2fe)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",whiteSpace:"nowrap"},
+  sbBtn:(active)=>({display:"flex",alignItems:"center",gap:10,padding:"9px 14px",margin:"2px 6px",borderRadius:10,border:"none",background:active?"rgba(79,172,254,0.13)":"transparent",color:active?C.blue:C.dim,cursor:"pointer",fontSize:13,fontWeight:active?700:400,textAlign:"left",whiteSpace:"nowrap",overflow:"hidden",transition:"all .18s"}),
+  main:{flex:1,display:"flex",flexDirection:"column",overflow:"hidden"},
+  topbar:{padding:"13px 22px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",gap:12,background:"rgba(255,255,255,0.02)"},
+  content:{flex:1,overflow:"auto",padding:"22px 26px"},
+  card:{background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:18,marginBottom:14},
+  input:{background:"rgba(255,255,255,0.06)",border:`1px solid rgba(79,172,254,0.18)`,borderRadius:9,color:"#dde8f8",padding:"9px 13px",fontSize:13,outline:"none",width:"100%",boxSizing:"border-box"},
+  pBtn:{background:"linear-gradient(135deg,#4facfe,#00f2fe)",border:"none",borderRadius:9,color:"#050e1f",padding:"9px 18px",fontSize:13,fontWeight:800,cursor:"pointer"},
+  sBtn:{background:"rgba(255,255,255,0.07)",border:`1px solid rgba(79,172,254,0.18)`,borderRadius:9,color:C.dim,padding:"9px 18px",fontSize:13,cursor:"pointer"},
+  dBtn:{background:"rgba(255,60,60,0.12)",border:"1px solid rgba(255,60,60,0.25)",borderRadius:9,color:"#ff8080",padding:"7px 14px",fontSize:12,cursor:"pointer"},
+  th:{background:"rgba(79,172,254,0.09)",padding:"9px 11px",textAlign:"left",color:C.blue,fontWeight:800,fontSize:11,textTransform:"uppercase",letterSpacing:1,borderBottom:`1px solid ${C.border}`},
+  td:{padding:"9px 11px",borderBottom:"1px solid rgba(255,255,255,0.04)",color:"#b8ccee",fontSize:13},
+  tag:(active)=>({display:"inline-block",padding:"2px 10px",borderRadius:20,fontSize:11,fontWeight:700,background:active?"rgba(79,172,254,0.15)":"rgba(100,100,100,0.12)",color:active?C.blue:"#506080",border:`1px solid ${active?C.blue:"transparent"}`,cursor:"pointer"}),
+};
+
+// ── Main Component ───────────────────────────────────────────
+export default function FarmaFlux() {
+  const [screen, setScreen] = useState("main");
+  const [projects, setProjects] = useState([]);
+  const [proj, setProj] = useState(null);
+  const [suppliers, setSuppliers] = useState([]);
+  const [medicines, setMedicines] = useState([]);
+  const [codes, setCodes] = useState({});
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [adminPwd, setAdminPwd] = useState("");
+  const [adminErr, setAdminErr] = useState("");
+  const [sideOpen, setSideOpen] = useState(true);
+  const [toast, setToast] = useState(null);
+  const [dbTab, setDbTab] = useState("sup");
+  const [dlTab, setDlTab] = useState("code");
+  const [codeInput, setCodeInput] = useState("");
+  const [codeErr, setCodeErr] = useState("");
+  const [selMonth, setSelMonth] = useState("");
+  const [cols, setCols] = useState({order:true,desc:true,val:true});
+  const [listening, setListening] = useState(false);
+  const [vStatus, setVStatus] = useState("");
+  const [genCodeResult, setGenCodeResult] = useState("");
+  // DB form state
+  const [newSup, setNewSup] = useState({name:"",address:"",nuit:"",phone:"",email:""});
+  const [newMed, setNewMed] = useState({name:"",pvp:"",pvf:"",iva:false});
+  // Suppliers/medicines new entry
+  const recRef = useRef(null);
+  const bufRef = useRef("");
+  const projRef = useRef(proj);
+  projRef.current = proj;
+
+  useEffect(() => {
+    (async () => {
+      setProjects(await loadAllProjects());
+      setSuppliers((await loadDB("suppliers")) || []);
+      setMedicines((await loadDB("medicines")) || []);
+      setCodes((await loadDB("dl_codes")) || {});
+    })();
+  }, []);
+
+  const toast$ = (msg, type="ok") => { setToast({msg,type}); setTimeout(()=>setToast(null),3200); };
+
+  // ── Project ops
+  const newProj = () => {
+    const p = {id:uid(),entity:"",date:new Date().toISOString().slice(0,10),rows:[],createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()};
+    setProj(p); setScreen("editor");
+  };
+  const openProj = (p) => { setProj(JSON.parse(JSON.stringify(p))); setScreen("editor"); };
+  const saveProj = async (p) => {
+    const u = {...p, updatedAt:new Date().toISOString()};
+    await saveProject(u); setProj(u); setProjects(await loadAllProjects()); toast$("Projecto guardado ✓");
+  };
+  const delProj = async (id) => {
+    await deleteProjectById(id); setProjects(await loadAllProjects());
+    if (proj?.id===id){setProj(null);setScreen("main");}
+    toast$("Projecto eliminado.","info");
+  };
+
+  // ── Row ops
+  const updRow = (id,field,val) => setProj(p=>({...p,rows:p.rows.map(r=>r.id===id?{...r,[field]:val}:r)}));
+  const addRow = () => setProj(p=>{const o=p.rows.length+1; return {...p,rows:[...p.rows,{id:uid(),order:o,description:"",value:"",iva:false}]};});
+  const delRow = (id) => setProj(p=>({...p,rows:p.rows.filter(r=>r.id!==id).map((r,i)=>({...r,order:i+1}))}));
+  const calcTotal = (rows=[]) => rows.reduce((s,r)=>{const v=parseFloat(r.value)||0;return s+v+(r.iva?v*0.16:0);},0);
+
+  // ── Voice
+  const startVoice = () => {
+    const SR = window.SpeechRecognition||window.webkitSpeechRecognition;
+    if (!SR){toast$("Browser não suporta voz.","err");return;}
+    const rec = new SR(); rec.lang="pt-PT"; rec.continuous=true; rec.interimResults=true;
+    rec.onresult=(e)=>{
+      let interim="";
+      for(let i=e.resultIndex;i<e.results.length;i++){
+        if(e.results[i].isFinal){
+          const t=e.results[i][0].transcript.trim().toLowerCase().replace(/[.,!?]/g,"");
+          processCmd(t);
+        } else interim+=e.results[i][0].transcript;
+      }
+      setVStatus(interim?`A ouvir: "${interim}"`:"A ouvir...");
+    };
+    rec.onerror=()=>setVStatus("Erro microfone.");
+    rec.onend=()=>{ if(recRef.current===rec) rec.start(); };
+    recRef.current=rec; rec.start(); setListening(true); setVStatus("A ouvir...");
+  };
+  const stopVoice = () => { recRef.current?.stop(); recRef.current=null; setListening(false); setVStatus(""); };
+  const processCmd = (text) => {
+    if(["espaço","espaco","próximo","proximo","seguinte","enter"].includes(text)){
+      if(bufRef.current.trim()) commitVoiceRow(bufRef.current.trim());
+      bufRef.current=""; setVStatus(""); return;
+    }
+    if(["stop","parar","pare","fim"].includes(text)){stopVoice();return;}
+    if(["apagar","eliminar","desfazer"].includes(text)){
+      setProj(p=>{if(!p)return p;const rows=[...p.rows];rows.pop();return{...p,rows:rows.map((r,i)=>({...r,order:i+1}))};});
+      return;
+    }
+    bufRef.current+=(bufRef.current?" ":"")+text;
+    setVStatus(`Capturado: "${bufRef.current}"`);
+  };
+  const commitVoiceRow = (text) => {
+    const cur = projRef.current; if(!cur) return;
+    const order = cur.rows.length+1;
+    let description="", value="";
+    const activeCols = cols;
+    if(activeCols.desc && !activeCols.val){ description=text; }
+    else if(activeCols.val && !activeCols.desc){
+      const n=parseFloat(text.replace(",",".").replace(/[^\d.]/g,"")); value=isNaN(n)?"":n.toString();
+    } else {
+      const parts=text.split(/\s+/);
+      const ni=parts.findIndex(p=>!isNaN(parseFloat(p.replace(",","."))));
+      if(ni>=0){ description=parts.slice(0,ni).join(" "); value=parseFloat(parts[ni].replace(",",".")).toString(); }
+      else description=text;
+    }
+    setProj(p=>({...p,rows:[...(p?.rows||[]),{id:uid(),order,description,value,iva:false}]}));
+  };
+
+  // ── Download codes
+  const makeCode = async (payload) => {
+    const code=genCode();
+    const nc={...codes,[code]:{...payload,used:false,createdAt:new Date().toISOString()}};
+    setCodes(nc); await saveDB("dl_codes",nc); return code;
+  };
+  const redeemCode = async () => {
+    const code=codeInput.trim().toUpperCase(); const entry=codes[code];
+    if(!entry){setCodeErr("Código inválido.");return;}
+    if(entry.used){setCodeErr("Código já foi utilizado.");return;}
+    const nc={...codes,[code]:{...entry,used:true}}; setCodes(nc); await saveDB("dl_codes",nc);
+    if(entry.projId){const p=projects.find(x=>x.id===entry.projId);if(p)exportOne(p);}
+    else if(entry.projIds){exportMany(projects.filter(x=>entry.projIds.includes(x.id)));}
+    setCodeInput(""); setCodeErr(""); toast$("Download iniciado! Código invalidado.");
+  };
+
+  const monthProjs = selMonth ? projects.filter(p=>p.date?.startsWith(selMonth)) : [];
+
+  // ── Supplier/medicine helpers
+  const addSup = async () => {
+    if(!newSup.name)return;
+    const list=[...suppliers,{...newSup,id:uid()}];
+    setSuppliers(list); await saveDB("suppliers",list);
+    setNewSup({name:"",address:"",nuit:"",phone:"",email:""}); toast$("Fornecedor adicionado!");
+  };
+  const delSup = async (id) => { const l=suppliers.filter(s=>s.id!==id); setSuppliers(l); await saveDB("suppliers",l); };
+  const addMed = async () => {
+    if(!newMed.name)return;
+    const list=[...medicines,{...newMed,id:uid()}];
+    setMedicines(list); await saveDB("medicines",list);
+    setNewMed({name:"",pvp:"",pvf:"",iva:false}); toast$("Medicamento adicionado!");
+  };
+  const delMed = async (id) => { const l=medicines.filter(m=>m.id!==id); setMedicines(l); await saveDB("medicines",l); };
+
+  // ─────────────────────────────────────────────────────────────
+  // RENDER SCREENS
+  // ─────────────────────────────────────────────────────────────
+
+  const ScreenMain = () => (
+    <div>
+      <div style={{marginBottom:22}}>
+        <h2 style={{fontSize:24,fontWeight:800,margin:"0 0 5px"}}>Projectos de Caixa</h2>
+        <p style={{color:C.dimmer,margin:0,fontSize:14}}>Todos os fluxos de caixa guardados</p>
+      </div>
+      <button style={S.pBtn} onClick={newProj}>+ Novo Projecto</button>
+      <div style={{marginTop:18}}>
+        {projects.length===0&&(
+          <div style={{...S.card,textAlign:"center",color:C.dimmer,padding:44}}>
+            <div style={{fontSize:44,marginBottom:10}}>📋</div>
+            <div>Nenhum projecto ainda. Crie o primeiro!</div>
+          </div>
+        )}
+        {projects.map(p=>(
+          <div key={p.id} style={{...S.card,display:"flex",alignItems:"center",gap:14,cursor:"pointer",transition:"background .2s"}}
+            onClick={()=>openProj(p)}>
+            <div style={{fontSize:30}}>💊</div>
+            <div style={{flex:1}}>
+              <div style={{fontWeight:700,fontSize:15}}>{p.entity||"Sem nome"}</div>
+              <div style={{color:C.dim,fontSize:12,marginTop:3}}>{p.date} · {getDOW(p.date)} · {p.rows?.length||0} linha(s)</div>
+            </div>
+            {isAdmin&&<>
+              <button style={S.sBtn} onClick={async e=>{e.stopPropagation();const c=await makeCode({projId:p.id});setGenCodeResult(c);toast$(`Código: ${c}`);}} >🔑 Código</button>
+              <button style={S.dBtn} onClick={e=>{e.stopPropagation();delProj(p.id);}}>Eliminar</button>
+            </>}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+
+  const ScreenEditor = () => {
+    if(!proj) return null;
+    const [medSugg, setMedSugg] = useState({});
+    const total = calcTotal(proj.rows);
+
+    return (
+      <div>
+        {/* Header */}
+        <div style={S.card}>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:11,marginBottom:14}}>
+            <div>
+              <label style={{fontSize:11,color:C.blue,fontWeight:800,display:"block",marginBottom:5}}>ENTIDADE / FARMÁCIA</label>
+              <input style={S.input} value={proj.entity} onChange={e=>setProj(p=>({...p,entity:e.target.value}))} placeholder="Nome da farmácia..." />
+            </div>
+            <div>
+              <label style={{fontSize:11,color:C.blue,fontWeight:800,display:"block",marginBottom:5}}>DATA</label>
+              <input style={S.input} type="date" value={proj.date} onChange={e=>setProj(p=>({...p,date:e.target.value}))} />
+            </div>
+            <div>
+              <label style={{fontSize:11,color:C.blue,fontWeight:800,display:"block",marginBottom:5}}>DIA DA SEMANA</label>
+              <div style={{...S.input,color:C.blue,fontWeight:700,background:"transparent",border:"none",padding:"9px 0"}}>{getDOW(proj.date)||"—"}</div>
+            </div>
+          </div>
+          {/* Column toggles */}
+          <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+            <span style={{fontSize:12,color:C.dimmer,marginRight:4}}>Colunas activas:</span>
+            {[["order","Nº Ordem"],["desc","Descrição"],["val","Valor"]].map(([k,l])=>(
+              <span key={k} style={S.tag(cols[k])} onClick={()=>setCols(c=>({...c,[k]:!c[k]}))}>
+                {l}
+              </span>
+            ))}
+          </div>
+        </div>
+
+        {/* Voice bar */}
+        <div style={{...S.card,display:"flex",alignItems:"center",gap:14}}>
+          <button onClick={listening?stopVoice:startVoice} style={{
+            width:50,height:50,borderRadius:"50%",border:"none",cursor:"pointer",fontSize:22,
+            background:listening?"linear-gradient(135deg,#ff4757,#ff6b81)":"linear-gradient(135deg,#4facfe,#00f2fe)",
+            color:"#050e1f",flexShrink:0,
+            boxShadow:listening?"0 0 18px rgba(255,71,87,.5)":"none",
+            animation:listening?"voicePulse 1.2s infinite":"none",
+          }}>{listening?"⏹":"🎙"}</button>
+          <div>
+            <div style={{fontWeight:700,fontSize:13}}>
+              {listening?"A gravar – diga 'espaço' para nova linha, 'stop' para parar":"Clique para activar reconhecimento de voz"}
+            </div>
+            <div style={{fontSize:12,color:C.dim,marginTop:2}}>{vStatus||"Suporte Português (PT)"}</div>
+          </div>
+          <div style={{flex:1}}/>
+          <div style={{fontSize:12,color:C.dim,textAlign:"right"}}>
+            <div>Comandos de voz:</div>
+            <div style={{color:C.cyan}}>"espaço" → nova linha &nbsp;|&nbsp; "apagar" → remove última &nbsp;|&nbsp; "stop" → parar</div>
+          </div>
+        </div>
+
+        {/* Table */}
+        <div style={{...S.card,padding:0,overflow:"hidden"}}>
+          <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+            <thead>
+              <tr>
+                {cols.order&&<th style={{...S.th,width:54}}>Nº</th>}
+                {cols.desc&&<th style={S.th}>Descrição / Medicamento</th>}
+                {cols.val&&<th style={{...S.th,width:140}}>Preço (MZN)</th>}
+                <th style={{...S.th,width:80}}>IVA</th>
+                {cols.val&&<th style={{...S.th,width:145}}>Total</th>}
+                <th style={{...S.th,width:44}}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {proj.rows.map(row=>{
+                const v=parseFloat(row.value)||0, iva=row.iva?v*0.16:0, t=v+iva;
+                const sugg=medicines.filter(m=>row.description.length>1&&m.name.toLowerCase().includes(row.description.toLowerCase())).slice(0,4);
+                return(
+                  <tr key={row.id}>
+                    {cols.order&&<td style={{...S.td,color:C.blue,fontWeight:800,textAlign:"center"}}>{row.order}</td>}
+                    {cols.desc&&<td style={S.td}>
+                      <div style={{position:"relative"}}>
+                        <input style={{...S.input,padding:"6px 10px"}} value={row.description}
+                          onChange={e=>updRow(row.id,"description",e.target.value)} placeholder="Medicamento..." />
+                        {sugg.length>0&&(
+                          <div style={{position:"absolute",top:"100%",left:0,right:0,zIndex:200,background:"#0c1e3a",border:`1px solid ${C.border}`,borderRadius:8,boxShadow:"0 8px 24px rgba(0,0,0,.5)"}}>
+                            {sugg.map(s=>(
+                              <div key={s.id} style={{padding:"8px 12px",cursor:"pointer",display:"flex",gap:10,alignItems:"center"}}
+                                onClick={()=>{updRow(row.id,"description",s.name);if(s.pvf)updRow(row.id,"value",s.pvf.toString());if(s.iva)updRow(row.id,"iva",true);}}>
+                                <span style={{flex:1,color:"#dde8f8"}}>{s.name}</span>
+                                {s.pvp&&<span style={{color:C.dim,fontSize:11}}>PVP {s.pvp}</span>}
+                                {s.pvf&&<span style={{color:C.cyan,fontSize:11}}>PVF {s.pvf}</span>}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </td>}
+                    {cols.val&&<td style={S.td}>
+                      <input style={{...S.input,padding:"6px 10px",width:120}} type="number" step="0.01"
+                        value={row.value} onChange={e=>updRow(row.id,"value",e.target.value)} placeholder="0.00" />
+                    </td>}
+                    <td style={S.td}>
+                      <label style={{display:"flex",alignItems:"center",gap:6,cursor:"pointer"}}>
+                        <input type="checkbox" checked={row.iva} onChange={e=>updRow(row.id,"iva",e.target.checked)} style={{accentColor:C.blue}} />
+                        <span style={{fontSize:11,color:row.iva?C.blue:C.dimmer}}>16%</span>
+                      </label>
+                    </td>
+                    {cols.val&&<td style={{...S.td,color:t>0?C.cyan:C.dimmer,fontWeight:700}}>{fmtMZN(t)}</td>}
+                    <td style={S.td}>
+                      <button onClick={()=>delRow(row.id)} style={{background:"none",border:"none",color:"#ff6060",cursor:"pointer",fontSize:15}}>✕</button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td colSpan={7} style={{padding:12}}>
+                  <button style={S.sBtn} onClick={addRow}>+ Adicionar Linha</button>
+                </td>
+              </tr>
+              <tr style={{background:"rgba(79,172,254,0.05)"}}>
+                <td colSpan={cols.order?4:3} style={{...S.td,textAlign:"right",fontWeight:800,color:C.blue,fontSize:13}}>TOTAL GERAL:</td>
+                <td style={{...S.td,fontWeight:800,color:C.cyan,fontSize:16}}>{fmtMZN(total)}</td>
+                <td/>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+
+        {/* Actions */}
+        <div style={{display:"flex",gap:10,flexWrap:"wrap",marginTop:4}}>
+          <button style={S.pBtn} onClick={()=>saveProj(proj)}>💾 Guardar</button>
+          {isAdmin&&<>
+            <button style={S.sBtn} onClick={()=>exportOne(proj)}>⬇ Exportar Excel</button>
+            <button style={S.sBtn} onClick={async()=>{const c=await makeCode({projId:proj.id});setGenCodeResult(c);toast$(`Código: ${c}`);}}>🔑 Gerar Código</button>
+          </>}
+          <button style={S.sBtn} onClick={()=>{saveProj(proj);setScreen("main");}}>← Voltar</button>
+          {genCodeResult&&<div style={{display:"flex",alignItems:"center",gap:8,padding:"8px 14px",background:"rgba(0,242,254,0.08)",border:"1px solid rgba(0,242,254,0.2)",borderRadius:9,fontSize:13,color:C.cyan}}>
+            🔑 Código: <strong>{genCodeResult}</strong>
+          </div>}
+        </div>
+      </div>
+    );
+  };
+
+  const ScreenDB = () => (
+    <div>
+      <h2 style={{fontSize:22,fontWeight:800,marginBottom:18}}>Base de Dados</h2>
+      <div style={{display:"flex",gap:8,marginBottom:18}}>
+        {[["sup","🏢 Fornecedores"],["med","💊 Medicamentos"]].map(([t,l])=>(
+          <button key={t} style={{...S.sBtn,...(dbTab===t?{background:"rgba(79,172,254,0.13)",color:C.blue,border:`1px solid ${C.blue}`}:{})}} onClick={()=>setDbTab(t)}>{l}</button>
+        ))}
+      </div>
+      {dbTab==="sup"&&<>
+        <div style={S.card}>
+          <div style={{fontWeight:700,color:C.blue,marginBottom:12}}>Novo Fornecedor</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:9}}>
+            <input style={S.input} placeholder="Nome *" value={newSup.name} onChange={e=>setNewSup(s=>({...s,name:e.target.value}))} />
+            <input style={S.input} placeholder="NUIT" value={newSup.nuit} onChange={e=>setNewSup(s=>({...s,nuit:e.target.value}))} />
+            <input style={S.input} placeholder="Telefone" value={newSup.phone} onChange={e=>setNewSup(s=>({...s,phone:e.target.value}))} />
+            <input style={S.input} placeholder="Email" value={newSup.email} onChange={e=>setNewSup(s=>({...s,email:e.target.value}))} />
+            <input style={{...S.input,gridColumn:"span 2"}} placeholder="Endereço completo" value={newSup.address} onChange={e=>setNewSup(s=>({...s,address:e.target.value}))} />
+          </div>
+          <button style={{...S.pBtn,marginTop:11}} onClick={addSup}>+ Adicionar Fornecedor</button>
+        </div>
+        <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+          <thead><tr>
+            {["Nome","NUIT","Telefone","Email","Endereço",""].map(h=><th key={h} style={S.th}>{h}</th>)}
+          </tr></thead>
+          <tbody>
+            {suppliers.map(s=>(
+              <tr key={s.id}>
+                <td style={{...S.td,fontWeight:700}}>{s.name}</td>
+                <td style={S.td}>{s.nuit||"—"}</td>
+                <td style={S.td}>{s.phone||"—"}</td>
+                <td style={S.td}>{s.email||"—"}</td>
+                <td style={S.td}>{s.address||"—"}</td>
+                <td style={S.td}><button onClick={()=>delSup(s.id)} style={{background:"none",border:"none",color:"#ff6060",cursor:"pointer"}}>✕</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </>}
+      {dbTab==="med"&&<>
+        <div style={S.card}>
+          <div style={{fontWeight:700,color:C.blue,marginBottom:12}}>Novo Medicamento</div>
+          <div style={{display:"grid",gridTemplateColumns:"2fr 1fr 1fr 120px",gap:9,alignItems:"end"}}>
+            <input style={S.input} placeholder="Nome do medicamento *" value={newMed.name} onChange={e=>setNewMed(m=>({...m,name:e.target.value}))} />
+            <div>
+              <label style={{fontSize:11,color:C.dim,display:"block",marginBottom:4}}>PVP (Público)</label>
+              <input style={S.input} type="number" placeholder="0.00" value={newMed.pvp} onChange={e=>setNewMed(m=>({...m,pvp:e.target.value}))} />
+            </div>
+            <div>
+              <label style={{fontSize:11,color:C.dim,display:"block",marginBottom:4}}>PVF (Farmácia)</label>
+              <input style={S.input} type="number" placeholder="0.00" value={newMed.pvf} onChange={e=>setNewMed(m=>({...m,pvf:e.target.value}))} />
+            </div>
+            <label style={{display:"flex",alignItems:"center",gap:7,cursor:"pointer",color:"#a0b4d0",paddingBottom:2}}>
+              <input type="checkbox" checked={newMed.iva} onChange={e=>setNewMed(m=>({...m,iva:e.target.checked}))} style={{accentColor:C.blue}} />
+              IVA 16%
+            </label>
+          </div>
+          <button style={{...S.pBtn,marginTop:11}} onClick={addMed}>+ Adicionar Medicamento</button>
+        </div>
+        <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+          <thead><tr>
+            {["Medicamento","PVP (Público)","PVF (Farmácia)","IVA",""].map(h=><th key={h} style={S.th}>{h}</th>)}
+          </tr></thead>
+          <tbody>
+            {medicines.map(m=>(
+              <tr key={m.id}>
+                <td style={{...S.td,fontWeight:700}}>{m.name}</td>
+                <td style={S.td}>{m.pvp?fmtMZN(m.pvp):"—"}</td>
+                <td style={S.td}>{m.pvf?fmtMZN(m.pvf):"—"}</td>
+                <td style={S.td}>
+                  <span style={{...S.tag(m.iva),cursor:"default"}}>{m.iva?"IVA 16%":"Isento"}</span>
+                </td>
+                <td style={S.td}><button onClick={()=>delMed(m.id)} style={{background:"none",border:"none",color:"#ff6060",cursor:"pointer"}}>✕</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </>}
+    </div>
+  );
+
+  const ScreenDownload = () => (
+    <div>
+      <h2 style={{fontSize:22,fontWeight:800,marginBottom:18}}>Downloads</h2>
+      <div style={{display:"flex",gap:8,marginBottom:18}}>
+        <button style={{...S.sBtn,...(dlTab==="code"?{background:"rgba(79,172,254,0.13)",color:C.blue,border:`1px solid ${C.blue}`}:{})}} onClick={()=>setDlTab("code")}>🔑 Código de Acesso</button>
+        {isAdmin&&<button style={{...S.sBtn,...(dlTab==="admin"?{background:"rgba(79,172,254,0.13)",color:C.blue,border:`1px solid ${C.blue}`}:{})}} onClick={()=>setDlTab("admin")}>👑 Admin</button>}
+      </div>
+      {dlTab==="code"&&(
+        <div style={S.card}>
+          <div style={{fontWeight:700,color:C.blue,marginBottom:6}}>Inserir Código de Download</div>
+          <p style={{color:C.dim,fontSize:13,marginBottom:14}}>Cada código é de uso único. Após utilização é automaticamente invalidado.</p>
+          <div style={{display:"flex",gap:10,alignItems:"center"}}>
+            <input style={{...S.input,width:180,textTransform:"uppercase",letterSpacing:3,fontWeight:800,textAlign:"center"}}
+              value={codeInput} onChange={e=>{setCodeInput(e.target.value.toUpperCase());setCodeErr("");}}
+              placeholder="XXXXXXXX" maxLength={8} onKeyDown={e=>e.key==="Enter"&&redeemCode()} />
+            <button style={S.pBtn} onClick={redeemCode}>⬇ Descarregar</button>
+          </div>
+          {codeErr&&<p style={{color:"#ff6060",marginTop:10,fontSize:13}}>⚠ {codeErr}</p>}
+        </div>
+      )}
+      {isAdmin&&dlTab==="admin"&&<>
+        <div style={S.card}>
+          <div style={{fontWeight:700,color:C.blue,marginBottom:12}}>Exportar por Mês</div>
+          <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
+            <input style={{...S.input,width:170}} type="month" value={selMonth} onChange={e=>setSelMonth(e.target.value)} />
+            <button style={S.pBtn} onClick={()=>{if(!monthProjs.length){toast$("Sem projectos neste mês.","err");return;}exportMany(monthProjs);}}>
+              ⬇ Exportar Mês ({monthProjs.length})
+            </button>
+            <button style={S.sBtn} onClick={async()=>{
+              if(!monthProjs.length)return;
+              const c=await makeCode({projIds:monthProjs.map(p=>p.id),month:selMonth});
+              setGenCodeResult(c); toast$(`Código mensal: ${c}`);
+            }}>🔑 Código para Mês</button>
+          </div>
+          {genCodeResult&&<div style={{marginTop:12,padding:"9px 14px",background:"rgba(0,242,254,0.08)",borderRadius:9,color:C.cyan,fontWeight:700}}>
+            Código gerado: {genCodeResult}
+          </div>}
+        </div>
+        <div style={S.card}>
+          <div style={{fontWeight:700,color:C.blue,marginBottom:12}}>Histórico de Códigos</div>
+          <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+            <thead><tr>
+              {["Código","Tipo","Estado","Criado em"].map(h=><th key={h} style={S.th}>{h}</th>)}
+            </tr></thead>
+            <tbody>
+              {Object.entries(codes).map(([code,info])=>(
+                <tr key={code}>
+                  <td style={{...S.td,fontWeight:800,letterSpacing:2,color:C.blue}}>{code}</td>
+                  <td style={S.td}>{info.month?`Mês ${info.month}`:"Diário"}</td>
+                  <td style={S.td}>
+                    <span style={{...S.tag(!info.used),cursor:"default"}}>{info.used?"Usado":"Válido"}</span>
+                  </td>
+                  <td style={{...S.td,color:C.dimmer}}>{new Date(info.createdAt).toLocaleString("pt-PT")}</td>
+                </tr>
+              ))}
+              {Object.keys(codes).length===0&&<tr><td colSpan={4} style={{...S.td,color:C.dimmer,textAlign:"center",padding:24}}>Nenhum código gerado ainda.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </>}
+    </div>
+  );
+
+  const ScreenAdmin = () => (
+    <div style={{maxWidth:400}}>
+      <h2 style={{fontSize:22,fontWeight:800,marginBottom:18}}>Acesso Administrador</h2>
+      {isAdmin?(
+        <div style={S.card}>
+          <div style={{fontSize:36,marginBottom:10}}>✅</div>
+          <div style={{fontWeight:800,color:C.cyan,marginBottom:12}}>Sessão Admin activa</div>
+          <p style={{color:C.dim,fontSize:13,marginBottom:14}}>Tem acesso a exportações, gestão de códigos e eliminação de projectos.</p>
+          <button style={S.dBtn} onClick={()=>setIsAdmin(false)}>Terminar sessão Admin</button>
+        </div>
+      ):(
+        <div style={S.card}>
+          <div style={{fontSize:36,marginBottom:10}}>🔐</div>
+          <p style={{color:C.dim,fontSize:13,marginBottom:14}}>Introduza a senha para desbloquear funcionalidades de administrador.</p>
+          <input style={{...S.input,marginBottom:11}} type="password"
+            placeholder="Senha de administrador"
+            value={adminPwd} onChange={e=>{setAdminPwd(e.target.value);setAdminErr("");}}
+            onKeyDown={e=>{if(e.key==="Enter"){if(adminPwd==="farma2024admin"){setIsAdmin(true);setAdminPwd("");setAdminErr("");}else setAdminErr("Senha incorrecta.");}}} />
+          {adminErr&&<p style={{color:"#ff6060",fontSize:13,marginBottom:10}}>⚠ {adminErr}</p>}
+          <button style={S.pBtn} onClick={()=>{if(adminPwd==="farma2024admin"){setIsAdmin(true);setAdminPwd("");setAdminErr("");}else setAdminErr("Senha incorrecta.");}}>Entrar</button>
+          <p style={{color:C.dimmer,fontSize:11,marginTop:14}}>Senha padrão: farma2024admin (altere após primeiro acesso)</p>
+        </div>
+      )}
+    </div>
+  );
+
+  // ─────────────────────────────────────────────────────────────
+  // LAYOUT
+  // ─────────────────────────────────────────────────────────────
+  return (
+    <div style={S.app}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,700;0,9..40,800&display=swap');
+        *{box-sizing:border-box;}
+        ::-webkit-scrollbar{width:5px;}
+        ::-webkit-scrollbar-thumb{background:rgba(79,172,254,.25);border-radius:3px;}
+        input::placeholder{color:#253a5a;}
+        input[type=date]::-webkit-calendar-picker-indicator{filter:invert(.4) sepia(1) saturate(3) hue-rotate(195deg);}
+        input[type=month]::-webkit-calendar-picker-indicator{filter:invert(.4) sepia(1) saturate(3) hue-rotate(195deg);}
+        button:hover{filter:brightness(1.1);}
+        tr:hover td{background:rgba(79,172,254,.04);}
+        @keyframes voicePulse{0%,100%{box-shadow:0 0 0 0 rgba(255,71,87,.5)}50%{box-shadow:0 0 0 14px rgba(255,71,87,0)}}
+        @keyframes toastIn{from{transform:translateY(16px);opacity:0}to{transform:translateY(0);opacity:1}}
+      `}</style>
+
+      {/* ── SIDEBAR ── */}
+      <div style={S.sidebar(sideOpen)}>
+        <div style={{padding:"18px 14px 14px",borderBottom:`1px solid ${C.border}`,display:"flex",alignItems:"center",gap:10}}>
+          <span style={{fontSize:22,flexShrink:0}}>💊</span>
+          {sideOpen&&<span style={S.logo}>FarmaFlux</span>}
+        </div>
+        <div style={{padding:"10px 0",flex:1,overflowY:"auto"}}>
+          {[
+            ["main","📋","Projectos"],
+            proj?["editor","✏️",proj.entity||"Editor"]:null,
+            ["database","🗃","Base de Dados"],
+            ["download","⬇","Downloads"],
+            ["admin","🔐","Admin"],
+          ].filter(Boolean).map(([s,icon,label])=>(
+            <button key={s} style={S.sbBtn(screen===s)} onClick={()=>setScreen(s)}>
+              <span style={{flexShrink:0,fontSize:16}}>{icon}</span>
+              {sideOpen&&<span>{label}</span>}
+            </button>
+          ))}
+        </div>
+        <div style={{borderTop:`1px solid ${C.border}`,padding:"8px 0"}}>
+          <button style={S.sbBtn(false)} onClick={()=>setSideOpen(o=>!o)}>
+            <span style={{flexShrink:0}}>{sideOpen?"◀":"▶"}</span>
+            {sideOpen&&<span>Recolher</span>}
+          </button>
+        </div>
+      </div>
+
+      {/* ── MAIN AREA ── */}
+      <div style={S.main}>
+        <div style={S.topbar}>
+          <span style={{fontWeight:800,fontSize:15,color:C.blue}}>FarmaFlux</span>
+          <div style={{flex:1}}/>
+          {isAdmin&&<span style={{fontSize:11,fontWeight:800,padding:"3px 10px",background:"rgba(255,180,0,.12)",color:"#ffb400",borderRadius:20,marginRight:8}}>👑 ADMIN</span>}
+          <span style={{fontSize:12,color:C.dimmer}}>{new Date().toLocaleDateString("pt-PT")} · {DIAS[new Date().getDay()]}</span>
+        </div>
+        <div style={S.content}>
+          {screen==="main"&&<ScreenMain/>}
+          {screen==="editor"&&<ScreenEditor/>}
+          {screen==="database"&&<ScreenDB/>}
+          {screen==="download"&&<ScreenDownload/>}
+          {screen==="admin"&&<ScreenAdmin/>}
+        </div>
+      </div>
+
+      {/* ── TOAST ── */}
+      {toast&&(
+        <div style={{
+          position:"fixed",bottom:22,right:22,zIndex:9999,
+          background:toast.type==="err"?"rgba(220,40,40,.95)":toast.type==="info"?"rgba(60,100,200,.9)":"rgba(0,180,100,.92)",
+          color:"#fff",padding:"11px 20px",borderRadius:11,fontWeight:700,fontSize:13,
+          boxShadow:"0 8px 28px rgba(0,0,0,.45)",animation:"toastIn .28s ease",maxWidth:320,
+        }}>{toast.msg}</div>
+      )}
+    </div>
+  );
+}
